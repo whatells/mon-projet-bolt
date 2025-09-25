@@ -5,38 +5,54 @@
 
 // DASHBOARD
 function ui_getDashboard(){
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName('Dashboard');
-  if (!sh) return {kpis:[], blocks:{}};
-  const last = Math.max(2, sh.getLastRow());
-  const kpis = sh.getRange(2,1,last-1,2).getValues().filter(r=>r[0]);
-  return {kpis:kpis, blocks:{}};
+  return timed('ui_getDashboard', () => {
+    const data = getDashboardCached_();
+    return { kpis: data.kpis || [], blocks: {} };
+  });
 }
-function ui_buildDashboard(){ buildDashboard(); return true; }
+function ui_buildDashboard(){ buildDashboard(); softExpireDashboard_(); return true; }
 
 // STOCK
 function ui_getStockPage(page, size){
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName('Stock');
-  const total = sh ? Math.max(0, sh.getLastRow()-1) : 0;
-  if (!sh || total===0) return {total:0, rows:[]};
-  const start = Math.max(0, (page-1)*size);
-  const rows = sh.getRange(2+start,1, Math.min(size,total-start), 15).getValues();
-  return {total: total, rows: rows};
+  return timed('ui_getStockPage', () => {
+    const rows = getStockAllRows_();
+    const total = rows.length;
+    const pageSize = Math.max(1, size || STOCK_PAGE_SIZE);
+    const current = Math.max(1, page || 1);
+    const start = Math.min(total, (current - 1) * pageSize);
+    const slice = rows.slice(start, start + pageSize);
+    return { total: total, rows: slice };
+  });
 }
-function ui_step3RefreshRefs(){ step3RefreshRefs(); return true; }
+function ui_step3RefreshRefs(){
+  return timed('ui_step3RefreshRefs', () => {
+    step3RefreshRefs();
+    purgeStockCache_();
+    softExpireDashboard_();
+    return true;
+  });
+}
 
 // VENTES
 function ui_getVentesPage(page, size){
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName('Ventes');
-  const total = sh ? Math.max(0, sh.getLastRow()-1) : 0;
-  if (!sh || total===0) return {total:0, rows:[]};
-  const start = Math.max(0, (page-1)*size);
-  const rows = sh.getRange(2+start,1, Math.min(size,total-start), 10).getValues();
-  return {total: total, rows: rows};
+  return timed('ui_getVentesPage', () => {
+    const rows = getVentesAllRows_();
+    const total = rows.length;
+    const pageSize = Math.max(1, size || VENTES_PAGE_SIZE);
+    const current = Math.max(1, page || 1);
+    const start = Math.min(total, (current - 1) * pageSize);
+    const slice = rows.slice(start, start + pageSize);
+    return { total: total, rows: slice };
+  });
 }
-function ui_step8RecalcAll(){ step8RecalcAll(); return true; }
+function ui_step8RecalcAll(){
+  return timed('ui_step8RecalcAll', () => {
+    step8RecalcAll();
+    purgeVentesCache_();
+    softExpireDashboard_();
+    return true;
+  });
+}
 
 // EMAILS & LOGS
 function ui_getLogsTail(n){

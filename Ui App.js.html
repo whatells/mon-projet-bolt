@@ -1,10 +1,39 @@
-<script>
 (function(){
-  console.time('ui_bootstrap');
-  const $ = (s,root=document)=>root.querySelector(s);
-  const $$ = (s,root=document)=>Array.from(root.querySelectorAll(s));
+  console.time('bootstrap');
+  const $ = (sel, root=document) => root.querySelector(sel);
+  const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
-  // --- Onglets ---
+  const payload = (typeof window !== 'undefined' ? window.__BOOTSTRAP__ : null) || {};
+  const state = {
+    ts: payload.ts || Date.now(),
+    kpis: Array.isArray(payload.kpis) ? payload.kpis : [],
+    dashboardStale: false,
+    dashboardHydrated: Array.isArray(payload.kpis),
+    stock: {
+      total: payload.stock && typeof payload.stock.total === 'number' ? payload.stock.total : 0,
+      pageSize: payload.stock && payload.stock.pageSize ? payload.stock.pageSize : 20,
+      pages: new Map(),
+      prefetched: false
+    },
+    ventes: {
+      total: payload.ventes && typeof payload.ventes.total === 'number' ? payload.ventes.total : 0,
+      pageSize: payload.ventes && payload.ventes.pageSize ? payload.ventes.pageSize : 20,
+      pages: new Map(),
+      prefetched: false
+    },
+    config: Array.isArray(payload.config) ? payload.config : [],
+    logs: Array.isArray(payload.logs) ? payload.logs : [],
+    logsLoaded: Array.isArray(payload.logs),
+    configLoaded: Array.isArray(payload.config)
+  };
+
+  if (payload.stock && Array.isArray(payload.stock.page1)) {
+    state.stock.pages.set(1, { rows: payload.stock.page1 });
+  }
+  if (payload.ventes && Array.isArray(payload.ventes.page1)) {
+    state.ventes.pages.set(1, { rows: payload.ventes.page1 });
+  }
+
   function setTab(name){
     $$('.sidebar nav button').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
     $$('.tab').forEach(t=>t.classList.toggle('active', t.id==='tab-'+name));
@@ -20,110 +49,231 @@
     if (btn){ setTab(btn.dataset.tab); }
   });
 
-  // --- Dashboard ---
   function renderKpis(list){
     const wrap = $('#kpiList');
-    if (!list || !list.length){ wrap.innerHTML = '<div class="status">Aucun KPI. Lance “Rebâtir KPI + Graphiques”.</div>'; return; }
+    if (!list || !list.length){
+      wrap.innerHTML = '<div class="status">Aucun KPI. Lance “Rebâtir KPI + Graphiques”.</div>';
+      return;
+    }
     wrap.innerHTML = list.map(([k,v])=>`<div class="item"><div class="label">${k}</div><div class="val">${v}</div></div>`).join('');
   }
-  function loadDashboard(){
+
+  function loadDashboard(options){
+    const opts = options || {};
+    if (!opts.force && state.dashboardHydrated && !state.dashboardStale){
+      renderKpis(state.kpis);
+      return;
+    }
     $('#kpiList').innerHTML = '<div class="status">Chargement…</div>';
-    console.time('ui_loadDashboard');
+    console.time('ui_loadDashboard:network');
     google.script.run.withSuccessHandler(res=>{
-      renderKpis(res.kpis);
-      console.timeEnd('ui_loadDashboard');
+      state.kpis = Array.isArray(res && res.kpis) ? res.kpis : [];
+      state.dashboardStale = false;
+      state.dashboardHydrated = true;
+      renderKpis(state.kpis);
+      console.timeEnd('ui_loadDashboard:network');
     }).ui_getDashboard();
   }
+
   $('#btnRebuildDash').addEventListener('click', ()=>{
-    $('#kpiList').innerHTML = '<div class="status">Recalcul…</div>';
-    google.script.run.withSuccessHandler(()=>loadDashboard()).ui_buildDashboard();
+    const btn = $('#btnRebuildDash');
+    btn.disabled = true;
+    google.script.run.withSuccessHandler(()=>{
+      btn.disabled = false;
+      state.dashboardStale = true;
+      loadDashboard({ force: true });
+    }).ui_buildDashboard();
   });
 
-  // --- Tables util ---
   function renderTable(el, rows, headers){
     if (!rows || !rows.length){ el.innerHTML = '<div class="status">Aucune donnée</div>'; return; }
     const head = headers ? `<thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead>` : '';
     const body = '<tbody>'+rows.map(r=>`<tr>${r.map(v=>`<td>${v==null?'':v}</td>`).join('')}</tr>`).join('')+'</tbody>';
     el.innerHTML = `<table>${head}${body}</table>`;
   }
+
   function renderPager(el, total, page, size, loadFn){
-    const pages = Math.max(1, Math.ceil(total/size));
+    const pages = Math.max(1, Math.ceil((total||0)/(size||1)));
     el.innerHTML = `<button ${page<=1?'disabled':''} id="pgPrev">◀</button> <span>${page}/${pages}</span> <button ${page>=pages?'disabled':''} id="pgNext">▶</button>`;
     $('#pgPrev') && $('#pgPrev').addEventListener('click', ()=>loadFn(page-1));
     $('#pgNext') && $('#pgNext').addEventListener('click', ()=>loadFn(page+1));
   }
 
-  // --- Stock ---
-  const STOCK_PAGE_SIZE = 20;
+  function requestStockPage(page, opts){
+    const options = opts || {};
+    const current = Math.max(1, page||1);
+    const pageSize = state.stock.pageSize;
+    if (options.log !== false){
+      console.time('ui_loadStock:network');
+    }
+    const run = google.script.run.withSuccessHandler(res=>{
+      const total = res && typeof res.total === 'number' ? res.total : 0;
+      const rows = Array.isArray(res && res.rows) ? res.rows : [];
+      state.stock.total = total;
+      state.stock.pages.set(current, { rows: rows });
+      if (!options.silent){
+        renderTable($('#stockTable'), rows, ['Date entrée','SKU','Titre','Photos','Catégorie','Marque','Taille','État','Prix achat (link)','Statut','Plateforme','Réf Achat','Favoris','Offres','Notes']);
+        renderPager($('#stockPager'), total, current, pageSize, loadStock);
+        if (current === 1) scheduleStockPrefetch();
+      }
+      if (options.log !== false){
+        console.timeEnd('ui_loadStock:network');
+      }
+    });
+    run.ui_getStockPage(current, pageSize);
+  }
+
+  function scheduleStockPrefetch(){
+    if (state.stock.prefetched) return;
+    state.stock.prefetched = true;
+    const totalPages = Math.ceil((state.stock.total||0)/state.stock.pageSize);
+    if (totalPages <= 1) return;
+    setTimeout(()=>{
+      requestStockPage(2, { silent: true, log: true });
+    }, 0);
+  }
+
   function loadStock(page){
-    const p = Math.max(1,page||1);
+    const current = Math.max(1, page||1);
+    const cached = state.stock.pages.get(current);
+    if (cached){
+      renderTable($('#stockTable'), cached.rows, ['Date entrée','SKU','Titre','Photos','Catégorie','Marque','Taille','État','Prix achat (link)','Statut','Plateforme','Réf Achat','Favoris','Offres','Notes']);
+      renderPager($('#stockPager'), state.stock.total, current, state.stock.pageSize, loadStock);
+      scheduleStockPrefetch();
+      return;
+    }
     $('#stockTable').innerHTML = '<div class="status">Chargement…</div>';
-    console.time('ui_loadStock');
-    google.script.run.withSuccessHandler(res=>{
-      renderTable($('#stockTable'), res.rows, ['Date entrée','SKU','Titre','Photos','Catégorie','Marque','Taille','État','Prix achat (link)','Statut','Plateforme','Réf Achat','Favoris','Offres','Notes']);
-      renderPager($('#stockPager'), res.total, p, STOCK_PAGE_SIZE, loadStock);
-      console.timeEnd('ui_loadStock');
-    }).ui_getStockPage(p, STOCK_PAGE_SIZE);
+    requestStockPage(current, { silent: false, log: true });
   }
+
   $('#btnStep3Refs').addEventListener('click', ()=>{
-    $('#btnStep3Refs').disabled = true;
-    google.script.run.withSuccessHandler(()=>{ $('#btnStep3Refs').disabled=false; loadStock(1); }).ui_step3RefreshRefs();
+    const btn = $('#btnStep3Refs');
+    btn.disabled = true;
+    google.script.run.withSuccessHandler(()=>{
+      btn.disabled = false;
+      state.stock.pages.clear();
+      state.stock.prefetched = false;
+      state.dashboardStale = true;
+      loadStock(1);
+    }).ui_step3RefreshRefs();
   });
 
-  // --- Ventes ---
-  const VENTES_PAGE_SIZE = 20;
-  function loadVentes(page){
-    const p = Math.max(1,page||1);
-    $('#ventesTable').innerHTML = '<div class="status">Chargement…</div>';
-    console.time('ui_loadVentes');
-    google.script.run.withSuccessHandler(res=>{
-      renderTable($('#ventesTable'), res.rows, ['Date','Plateforme','Titre','Prix','Frais/Comm','Frais port','Acheteur','SKU','Marge brute','Marge nette']);
-      renderPager($('#ventesPager'), res.total, p, VENTES_PAGE_SIZE, loadVentes);
-      console.timeEnd('ui_loadVentes');
-    }).ui_getVentesPage(p, VENTES_PAGE_SIZE);
+  function requestVentesPage(page, opts){
+    const options = opts || {};
+    const current = Math.max(1, page||1);
+    const pageSize = state.ventes.pageSize;
+    if (options.log !== false){
+      console.time('ui_loadVentes:network');
+    }
+    const run = google.script.run.withSuccessHandler(res=>{
+      const total = res && typeof res.total === 'number' ? res.total : 0;
+      const rows = Array.isArray(res && res.rows) ? res.rows : [];
+      state.ventes.total = total;
+      state.ventes.pages.set(current, { rows: rows });
+      if (!options.silent){
+        renderTable($('#ventesTable'), rows, ['Date','Plateforme','Titre','Prix','Frais/Comm','Frais port','Acheteur','SKU','Marge brute','Marge nette']);
+        renderPager($('#ventesPager'), total, current, pageSize, loadVentes);
+        if (current === 1) scheduleVentesPrefetch();
+      }
+      if (options.log !== false){
+        console.timeEnd('ui_loadVentes:network');
+      }
+    });
+    run.ui_getVentesPage(current, pageSize);
   }
+
+  function scheduleVentesPrefetch(){
+    if (state.ventes.prefetched) return;
+    state.ventes.prefetched = true;
+    const totalPages = Math.ceil((state.ventes.total||0)/state.ventes.pageSize);
+    if (totalPages <= 1) return;
+    setTimeout(()=>{
+      requestVentesPage(2, { silent: true, log: true });
+    }, 0);
+  }
+
+  function loadVentes(page){
+    const current = Math.max(1, page||1);
+    const cached = state.ventes.pages.get(current);
+    if (cached){
+      renderTable($('#ventesTable'), cached.rows, ['Date','Plateforme','Titre','Prix','Frais/Comm','Frais port','Acheteur','SKU','Marge brute','Marge nette']);
+      renderPager($('#ventesPager'), state.ventes.total, current, state.ventes.pageSize, loadVentes);
+      scheduleVentesPrefetch();
+      return;
+    }
+    $('#ventesTable').innerHTML = '<div class="status">Chargement…</div>';
+    requestVentesPage(current, { silent: false, log: true });
+  }
+
   $('#btnRecalcMargins').addEventListener('click', ()=>{
-    const b = $('#btnRecalcMargins'); b.disabled = true;
-    google.script.run.withSuccessHandler(()=>{ b.disabled=false; loadVentes(1); }).ui_step8RecalcAll();
+    const b = $('#btnRecalcMargins');
+    b.disabled = true;
+    google.script.run.withSuccessHandler(()=>{
+      b.disabled=false;
+      state.ventes.pages.clear();
+      state.ventes.prefetched = false;
+      state.dashboardStale = true;
+      loadVentes(1);
+    }).ui_step8RecalcAll();
   });
 
-  // --- Emails & Logs ---
-  function loadLogs(){
+  function loadLogs(force){
+    if (!force && state.logsLoaded){
+      renderTable($('#logsTable'), state.logs, ['Horodatage','Niveau','Source','Message','Détails']);
+      return;
+    }
     $('#logsTable').innerHTML = '<div class="status">Chargement…</div>';
     console.time('ui_loadLogs');
     google.script.run.withSuccessHandler(rows=>{
-      renderTable($('#logsTable'), rows, ['Horodatage','Niveau','Source','Message','Détails']);
+      state.logs = Array.isArray(rows) ? rows : [];
+      state.logsLoaded = true;
+      renderTable($('#logsTable'), state.logs, ['Horodatage','Niveau','Source','Message','Détails']);
       console.timeEnd('ui_loadLogs');
     }).ui_getLogsTail(50);
   }
+
   $('#btnIngestFast').addEventListener('click', ()=>{
-    const b = $('#btnIngestFast'); b.disabled = true;
-    google.script.run.withSuccessHandler(()=>{ b.disabled=false; loadLogs(); }).ui_ingestFast();
+    const b = $('#btnIngestFast');
+    b.disabled = true;
+    google.script.run.withSuccessHandler(()=>{
+      b.disabled=false;
+      loadLogs(true);
+    }).ui_ingestFast();
   });
 
-  // --- Config ---
-  function loadConfig(){
+  function loadConfig(force){
+    if (!force && state.configLoaded){
+      applyConfig(state.config);
+      return;
+    }
     const form = $('#cfgForm');
-    $$('#cfgForm input').forEach(i=>i.value='');
+    $$('#cfgForm input').forEach(i=>{ if (i.type==='checkbox'){ i.checked=false; } else { i.value=''; }});
     console.time('ui_loadConfig');
     google.script.run.withSuccessHandler(rows=>{
-      rows.forEach(({key,value})=>{
-        const el = form.querySelector(`[name="${key}"]`);
-        if (!el) return;
-        if (el.type==='checkbox') el.checked = /^(true|1|oui|yes)$/i.test(String(value||''));
-        else el.value = (value!=null? value : '');
-      });
+      const data = Array.isArray(rows) ? rows : [];
+      state.config = data;
+      state.configLoaded = true;
+      applyConfig(data);
       console.timeEnd('ui_loadConfig');
     }).ui_getConfig();
   }
+
+  function applyConfig(rows){
+    const form = $('#cfgForm');
+    rows.forEach(({key,value})=>{
+      const el = form.querySelector(`[name="${key}"]`);
+      if (!el) return;
+      if (el.type==='checkbox') el.checked = /^(true|1|oui|yes)$/i.test(String(value||''));
+      else el.value = (value!=null? value : '');
+    });
+  }
+
   $('#btnSaveCfg').addEventListener('click', ()=>{
     const rows = $$('#cfgForm input').map(el=>({ key: el.name, value: (el.type==='checkbox'? (el.checked?'TRUE':'FALSE') : el.value) }));
     const b = $('#btnSaveCfg'); b.disabled = true; b.textContent = 'Enregistrement…';
     google.script.run.withSuccessHandler(res=>{ b.disabled=false; b.textContent='Enregistrer'; }).ui_saveConfig(rows);
   });
 
-  // Init
   setTab('dash');
-  console.timeEnd('ui_bootstrap');
+  console.timeEnd('bootstrap');
 })();
-</script>

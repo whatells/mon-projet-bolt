@@ -15,19 +15,6 @@ function onOpen() {
 }
 
 /**
- * Ouvre l'interface principale du CRM
- */
-function openCRM() {
-  const html = HtmlService.createTemplateFromFile('CRM_Interface');
-  const htmlOutput = html.evaluate()
-    .setWidth(1200)
-    .setHeight(800)
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
-  
-  SpreadsheetApp.getUi().showModalDialog(htmlOutput, '🚀 CRM - Interface Principale');
-}
-
-/**
  * Ouvre la fenêtre de configuration
  */
 function openConfig() {
