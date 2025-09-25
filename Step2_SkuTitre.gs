@@ -26,6 +26,16 @@ function onEdit(e) {
     if (r < 2) return; // ignorer l’en-tête
 
     var name = sh.getName();
+    var achatsName = (typeof SHEET_ACHATS === 'string') ? SHEET_ACHATS : 'Achats';
+    if (name === achatsName) {
+      var achatsPrixCol = (typeof COL_ACHATS_PRIX === 'number') ? COL_ACHATS_PRIX : 3;
+      var achatsRefCol = (typeof COL_ACHATS_REF === 'number') ? COL_ACHATS_REF : 9;
+      if (typeof step3InvalidateRefCache_ === 'function' && (c === achatsPrixCol || c === achatsRefCol)) {
+        try { step3InvalidateRefCache_(); } catch (_) {}
+      }
+      return;
+    }
+
     if (name === SHEET_STOCK) {
       if (c === COL_STOCK_SKU || c === COL_STOCK_TIT) {
         fixOneStockRow_(sh, r);
@@ -33,6 +43,10 @@ function onEdit(e) {
       if (c === COL_STOCK_REF) {
         // Étape 3 : dès qu’on choisit une Réf Achat, on propage le prix
         step3PropagateRow_(sh, r);
+      }
+      var prixCol = (typeof COL_STOCK_PRIX_ACHAT === 'number') ? COL_STOCK_PRIX_ACHAT : 9;
+      if (c === prixCol && typeof step8InvalidateCostCache_ === 'function') {
+        try { step8InvalidateCostCache_(); } catch (_) {}
       }
       return;
     }
@@ -50,42 +64,66 @@ function onEdit(e) {
 
 // ---------- STOCK : maintenance ligne par ligne ----------
 function fixOneStockRow_(sh, row) {
-  var sku = String(sh.getRange(row, COL_STOCK_SKU).getValue() || "").trim().toUpperCase();
-  var title = String(sh.getRange(row, COL_STOCK_TIT).getValue() || "").trim();
+  var data = sh.getRange(row, COL_STOCK_SKU, 1, 2).getValues()[0];
+  var skuRaw = data[0];
+  var titleRaw = data[1];
+  var sku = String(skuRaw || "").trim().toUpperCase();
+  var title = String(titleRaw || "").trim();
+  var changed = false;
 
-  if (sku && sku !== String(sh.getRange(row, COL_STOCK_SKU).getValue())) {
-    sh.getRange(row, COL_STOCK_SKU).setValue(sku);
+  if (sku && sku !== String(skuRaw || "")) {
+    data[0] = sku;
+    changed = true;
   }
 
   var okSku = /^[A-Z0-9]{1,4}$/.test(sku);
   if (okSku) {
     var re = new RegExp("\\b" + sku + "\\b");
     if (!re.test(title)) {
-      title = (title ? title + " " : "") + sku;
-      sh.getRange(row, COL_STOCK_TIT).setValue(title);
+      data[1] = (title ? title + " " : "") + sku;
+      changed = true;
     }
+  }
+
+  if (changed) {
+    sh.getRange(row, COL_STOCK_SKU, 1, 2).setValues([data]);
   }
 }
 
 // ---------- VENTES : maintenance ligne par ligne ----------
 function fixOneVenteRow_(sh, row) {
-  var title = String(sh.getRange(row, COL_VENTES_TIT).getValue() || "").trim();
-  var sku = String(sh.getRange(row, COL_VENTES_SKU).getValue() || "").trim().toUpperCase();
+  var width = COL_VENTES_SKU - COL_VENTES_TIT + 1;
+  var data = sh.getRange(row, COL_VENTES_TIT, 1, width).getValues()[0];
+  var titleRaw = data[0];
+  var skuRaw = data[width - 1];
+  var title = String(titleRaw || "").trim();
+  var sku = String(skuRaw || "").trim().toUpperCase();
+  var newTitle = title;
+  var newSku = sku;
+  var titleChanged = false;
+  var skuChanged = false;
 
   var m = title.match(/\b[A-Z0-9]{1,4}\b/);
   if (m && m[0]) {
     var extracted = m[0].toUpperCase();
     if (!sku || sku !== extracted) {
-      sku = extracted;
-      sh.getRange(row, COL_VENTES_SKU).setValue(sku);
+      newSku = extracted;
+      skuChanged = true;
     }
   }
 
-  if (sku) {
-    var re = new RegExp("\\b" + sku + "\\b");
-    if (!re.test(title)) {
-      title = (title ? title + " " : "") + sku;
-      sh.getRange(row, COL_VENTES_TIT).setValue(title);
+  if (newSku) {
+    var re = new RegExp("\\b" + newSku + "\\b");
+    if (!re.test(newTitle)) {
+      newTitle = (newTitle ? newTitle + " " : "") + newSku;
+      titleChanged = true;
     }
+  }
+
+  if (skuChanged) {
+    sh.getRange(row, COL_VENTES_SKU).setValue(newSku);
+  }
+  if (titleChanged) {
+    sh.getRange(row, COL_VENTES_TIT).setValue(newTitle);
   }
 }

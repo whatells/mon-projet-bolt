@@ -232,3 +232,17 @@ function log_(level, source, message, details) {
     console.log({level: level, source: source, message: message, details: details, err: String(e)});
   }
 }
+
+function timed_(label, fn) {
+  var start = Date.now();
+  var getElapsed = function() { return Date.now() - start; };
+  try {
+    return fn ? fn(getElapsed) : null;
+  } finally {
+    try {
+      log_("INFO", "PERF", label, "server ms=" + (Date.now() - start));
+    } catch (err) {
+      console.log({ perfLabel: label, err: String(err) });
+    }
+  }
+}
