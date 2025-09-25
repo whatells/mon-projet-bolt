@@ -24,6 +24,11 @@ var SHEET_STOCK = "Stock";
 var COL_S_SKU = 2;        // B
 var COL_S_COST = 9;       // I Prix achat (link)
 
+var STEP8_COST_CACHE_KEY = 'STEP8::COST_MAP';
+var STEP8_COST_CACHE_TTL = 600;
+var STEP8_COST_MAP_CACHE = null;
+var STEP8_FLAGS_CACHE = null;
+
 // ---- Calculs unitaires ----
 function step8CommissionFor_(platform, price){
   var fees = getPlatformFees_(platform); // {pct,min,flat}
@@ -33,23 +38,13 @@ function step8CommissionFor_(platform, price){
 
 function step8LookupCostBySku_(sku){
   if (!sku) return 0;
-  var ss = SpreadsheetApp.getActive();
-  var st = ss.getSheetByName(SHEET_STOCK);
-  if (!st) return 0;
-  var last = st.getLastRow();
-  if (last<2) return 0;
-  var skus = st.getRange(2, COL_S_SKU, last-1, 1).getValues();
-  for (var i=0;i<skus.length;i++){
-    if (String(skus[i][0]).toUpperCase()===String(sku).toUpperCase()){
-      var cost = st.getRange(i+2, COL_S_COST).getValue();
-      return Number(cost||0);
-    }
-  }
-  return 0;
+  var map = step8GetCostMap_();
+  var key = String(sku).toUpperCase();
+  return Number(map[key] || 0);
 }
 
 function step8ComputeMargins_(platform, price, ship, sku){
-  var flags = getGlobalFlags_();
+  var flags = step8GetFlags_();
   var fees = step8CommissionFor_(platform, price);
   var cost = step8LookupCostBySku_(sku);
   var gross = Number(price||0) - Number(cost||0) - Number(fees||0) - Number(ship||0);
@@ -66,22 +61,34 @@ function step8ComputeMargins_(platform, price, ship, sku){
 
 // ---- Recalculs ----
 function step8RecalcAll(){
-  var ss = SpreadsheetApp.getActive();
-  var sh = ss.getSheetByName("Ventes");
-  if (!sh || sh.getLastRow()<2) return;
-  var last = sh.getLastRow();
-  var vals = sh.getRange(2,1,last-1, COL_V_MARGIN_N).getValues();
-  for (var i=0;i<vals.length;i++){
-    var r = i+2;
-    var platform = vals[i][COL_V_PLATFORM-1];
-    var price    = Number(vals[i][COL_V_PRICE-1]||0);
-    var ship     = Number(vals[i][COL_V_SHIP-1]||0);
-    var sku      = vals[i][COL_V_SKU-1];
-    var m = step8ComputeMargins_(platform, price, ship, sku);
-    sh.getRange(r, COL_V_FEES).setValue(m.fees);
-    sh.getRange(r, COL_V_MARGIN_G).setValue(m.gross);
-    sh.getRange(r, COL_V_MARGIN_N).setValue(m.net);
-  }
+  return timed_("step8RecalcAll", function(getMs) {
+    var ss = SpreadsheetApp.getActive();
+    var sh = ss.getSheetByName("Ventes");
+    if (!sh || sh.getLastRow()<2) return;
+    var last = sh.getLastRow();
+    var rows = last - 1;
+    var vals = sh.getRange(2,1,rows, COL_V_MARGIN_N).getValues();
+    STEP8_FLAGS_CACHE = null;
+    var fees = new Array(rows);
+    var gross = new Array(rows);
+    var net = new Array(rows);
+
+    for (var i=0;i<rows;i++){
+      var platform = vals[i][COL_V_PLATFORM-1];
+      var price    = Number(vals[i][COL_V_PRICE-1]||0);
+      var ship     = Number(vals[i][COL_V_SHIP-1]||0);
+      var sku      = vals[i][COL_V_SKU-1];
+      var m = step8ComputeMargins_(platform, price, ship, sku);
+      fees[i] = [m.fees];
+      gross[i] = [m.gross];
+      net[i] = [m.net];
+    }
+
+    sh.getRange(2, COL_V_FEES, rows, 1).setValues(fees);
+    sh.getRange(2, COL_V_MARGIN_G, rows, 1).setValues(gross);
+    sh.getRange(2, COL_V_MARGIN_N, rows, 1).setValues(net);
+    log_("INFO","Étape8","Recalcul complet des marges","server ms=" + getMs());
+  });
 }
 
 function step8RecalcCurrent(){
@@ -89,10 +96,13 @@ function step8RecalcCurrent(){
   if (!sh || sh.getName()!=="Ventes") return;
   var r = sh.getActiveRange().getRow();
   if (r<2) return;
-  var platform = sh.getRange(r,COL_V_PLATFORM).getValue();
-  var price    = Number(sh.getRange(r,COL_V_PRICE).getValue()||0);
-  var ship     = Number(sh.getRange(r,COL_V_SHIP).getValue()||0);
-  var sku      = String(sh.getRange(r,COL_V_SKU).getValue()||"");
+  STEP8_FLAGS_CACHE = null;
+  var width = COL_V_SKU - COL_V_PLATFORM + 1;
+  var rowData = sh.getRange(r, COL_V_PLATFORM, 1, width).getValues()[0];
+  var platform = rowData[0];
+  var price    = Number(rowData[COL_V_PRICE - COL_V_PLATFORM] || 0);
+  var ship     = Number(rowData[COL_V_SHIP - COL_V_PLATFORM] || 0);
+  var sku      = String(rowData[COL_V_SKU - COL_V_PLATFORM] || "");
   var m = step8ComputeMargins_(platform, price, ship, sku);
   sh.getRange(r, COL_V_FEES).setValue(m.fees);
   sh.getRange(r, COL_V_MARGIN_G).setValue(m.gross);
@@ -113,3 +123,119 @@ function insertSale_(sh, d){
   sh.getRange(row, COL_V_MARGIN_G).setValue(m.gross);
   sh.getRange(row, COL_V_MARGIN_N).setValue(m.net);
 }
+
+function step8GetCostMap_() {
+  if (STEP8_COST_MAP_CACHE) {
+    return STEP8_COST_MAP_CACHE;
+  }
+
+  var cache = CacheService.getDocumentCache();
+  if (cache) {
+    var cached = cache.get(STEP8_COST_CACHE_KEY);
+    if (cached) {
+      try {
+        var payload = JSON.parse(cached);
+        if (payload && typeof payload.map === 'object') {
+          STEP8_COST_MAP_CACHE = payload.map || {};
+        } else {
+          STEP8_COST_MAP_CACHE = payload || {};
+        }
+        return STEP8_COST_MAP_CACHE;
+      } catch (err) {
+        step8InvalidateCostCache_();
+      }
+    }
+  }
+
+  var props = PropertiesService.getDocumentProperties();
+  var stored = props.getProperty(STEP8_COST_CACHE_KEY);
+  if (stored) {
+    try {
+      var payloadProp = JSON.parse(stored);
+      if (payloadProp && typeof payloadProp.map === 'object') {
+        STEP8_COST_MAP_CACHE = payloadProp.map || {};
+      } else {
+        STEP8_COST_MAP_CACHE = payloadProp || {};
+      }
+      if (cache) cache.put(STEP8_COST_CACHE_KEY, stored, STEP8_COST_CACHE_TTL);
+      return STEP8_COST_MAP_CACHE;
+    } catch (e) {
+      step8InvalidateCostCache_();
+    }
+  }
+
+  return step8PrimeCostCache_();
+}
+
+function step8ComputeCostMap_(sheet) {
+  var sh = sheet || SpreadsheetApp.getActive().getSheetByName(SHEET_STOCK);
+  if (!sh) return {};
+  var last = sh.getLastRow();
+  if (last < 2) return {};
+  var rows = last - 1;
+  var skus = sh.getRange(2, COL_S_SKU, rows, 1).getValues();
+  var costs = sh.getRange(2, COL_S_COST, rows, 1).getValues();
+  var out = {};
+  for (var i = 0; i < rows; i++) {
+    var sku = String(skus[i][0] || "").toUpperCase();
+    if (!sku) continue;
+    out[sku] = Number(costs[i][0] || 0);
+  }
+  return out;
+}
+
+function step8StoreCostMap_(map) {
+  STEP8_COST_MAP_CACHE = map || {};
+  var payload = { map: STEP8_COST_MAP_CACHE, ts: Date.now() };
+  var json = JSON.stringify(payload);
+  try {
+    var cache = CacheService.getDocumentCache();
+    if (cache) {
+      cache.put(STEP8_COST_CACHE_KEY, json, STEP8_COST_CACHE_TTL);
+    }
+  } catch (_) {}
+  try {
+    PropertiesService.getDocumentProperties().setProperty(STEP8_COST_CACHE_KEY, json);
+  } catch (_) {}
+  return STEP8_COST_MAP_CACHE;
+}
+
+function step8InvalidateCostCache_() {
+  STEP8_COST_MAP_CACHE = null;
+  try {
+    var cache = CacheService.getDocumentCache();
+    if (cache) {
+      cache.remove(STEP8_COST_CACHE_KEY);
+    }
+  } catch (_) {}
+  try {
+    PropertiesService.getDocumentProperties().deleteProperty(STEP8_COST_CACHE_KEY);
+  } catch (_) {}
+}
+
+function step8PrimeCostCache_(sheet) {
+  var map = step8ComputeCostMap_(sheet);
+  return step8StoreCostMap_(map);
+}
+
+function step8GetFlags_() {
+  if (!STEP8_FLAGS_CACHE) {
+    STEP8_FLAGS_CACHE = (typeof getGlobalFlags_ === 'function') ? getGlobalFlags_() : {};
+  }
+  return STEP8_FLAGS_CACHE;
+}
+
+/**
+ * Fonction de pré-calcul manuel (installer un trigger horaire via l'interface Apps Script).
+ */
+function cronRecompute() {
+  return timed_("cronRecompute", function(getMs) {
+    var refMap = (typeof step3PrimeRefCache_ === 'function') ? step3PrimeRefCache_() : {};
+    var costMap = step8PrimeCostCache_();
+    var refsCount = refMap ? Object.keys(refMap).length : 0;
+    var costCount = costMap ? Object.keys(costMap).length : 0;
+    log_("INFO", "Cron", "Caches pré-calculés", "refs=" + refsCount + ";costs=" + costCount + ";server ms=" + getMs());
+    return { refs: refsCount, costs: costCount };
+  });
+}
+
